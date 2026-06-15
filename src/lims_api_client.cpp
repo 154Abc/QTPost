@@ -6,6 +6,9 @@
 #include <QJsonArray>
 #include <QUrl>
 #include <QDebug>
+#include <QFile>
+#include <QFileInfo>
+#include <QCryptographicHash>
 
 LimsApiClient::LimsApiClient(const QString &baseUrl, QObject *parent)
     : QObject(parent), m_baseUrl(baseUrl), m_lastErrorCode(0), m_currentReply(nullptr) {
@@ -96,12 +99,12 @@ void LimsApiClient::getStandardMeasurement(const QString &apiKey,
 void LimsApiClient::uploadTestResults(const QString &apiKey,
                                      const QString &conditionType,
                                      const QString &autoSysUnique,
-                                     const QJsonObject &paramData) {
+                                     const QJsonArray &paramArray) {
     QJsonObject requestBody;
     requestBody["apiKey"] = apiKey;
     requestBody["conditionType"] = conditionType;
     requestBody["autoSysUnique"] = autoSysUnique;
-    requestBody["param"] = paramData;
+    requestBody["param"] = paramArray.isEmpty() ? "[]" : QString::fromUtf8(QJsonDocument(paramArray).toJson(QJsonDocument::Compact));
 
     QJsonDocument doc(requestBody);
     QNetworkRequest request = createRequest("/mms/api/v1/uploadExtNew");
@@ -113,6 +116,71 @@ void LimsApiClient::uploadTestResults(const QString &apiKey,
     connect(m_currentReply, &QNetworkReply::finished, this, &LimsApiClient::onFileUploadFinished);
     connect(m_currentReply, QOverload<QNetworkReply::NetworkError>::of(&QNetworkReply::error),
             this, &LimsApiClient::onNetworkError);
+}
+
+void LimsApiClient::uploadTestResultsWithBase64(const QString &apiKey,
+                                               const QString &conditionType,
+                                               const QString &autoSysUnique,
+                                               const QStringList &filePaths,
+                                               const QStringList &keys) {
+    if (filePaths.size() != keys.size()) {
+        m_lastError = "File paths count must match keys count";
+        emit fileUploadFailed(m_lastError);
+        return;
+    }
+
+    QJsonArray paramArray;
+
+    for (int i = 0; i < filePaths.size(); ++i) {
+        QString base64Content = fileToBase64(filePaths[i]);
+        if (base64Content.isEmpty()) {
+            m_lastError = QString("Failed to read file: %1").arg(filePaths[i]);
+            emit fileUploadFailed(m_lastError);
+            return;
+        }
+
+        QJsonObject paramItem;
+        paramItem["key"] = keys[i];
+        paramItem["certfile"] = base64Content;
+        paramArray.append(paramItem);
+    }
+
+    QJsonObject requestBody;
+    requestBody["apiKey"] = apiKey;
+    requestBody["conditionType"] = conditionType;
+    requestBody["autoSysUnique"] = autoSysUnique;
+    // param field should be a JSON string representation of the array
+    requestBody["param"] = QString::fromUtf8(QJsonDocument(paramArray).toJson(QJsonDocument::Compact));
+
+    QJsonDocument doc(requestBody);
+    QNetworkRequest request = createRequest("/mms/api/v1/uploadExtNew");
+
+    if (m_currentReply) {
+        m_currentReply->deleteLater();
+    }
+    m_currentReply = m_networkManager->post(request, doc.toJson(QJsonDocument::Compact));
+    connect(m_currentReply, &QNetworkReply::finished, this, &LimsApiClient::onFileUploadFinished);
+    connect(m_currentReply, QOverload<QNetworkReply::NetworkError>::of(&QNetworkReply::error),
+            this, &LimsApiClient::onNetworkError);
+}
+
+QString LimsApiClient::fileToBase64(const QString &filePath) {
+    QFile file(filePath);
+    if (!file.exists()) {
+        qWarning() << "File not found:" << filePath;
+        return QString();
+    }
+
+    if (!file.open(QIODevice::ReadOnly)) {
+        qWarning() << "Cannot open file:" << filePath << "Error:" << file.errorString();
+        return QString();
+    }
+
+    QByteArray fileData = file.readAll();
+    file.close();
+
+    QByteArray base64Data = fileData.toBase64();
+    return QString::fromLatin1(base64Data);
 }
 
 void LimsApiClient::onLoginFinished() {
@@ -198,11 +266,24 @@ void LimsApiClient::onFileUploadFinished() {
 
     if (m_currentReply->error() == QNetworkReply::NoError) {
         QByteArray responseData = m_currentReply->readAll();
-        QJsonDocument jsonDoc = QJsonDocument::fromJson(responseData);
-        QJsonObject jsonObj = jsonDoc.object();
+        qDebug() << "Raw response:" << responseData;
 
+        QJsonDocument jsonDoc = QJsonDocument::fromJson(responseData);
+        if (!jsonDoc.isObject()) {
+            m_lastError = "Invalid JSON response";
+            emit fileUploadFailed(m_lastError);
+            m_currentReply->deleteLater();
+            m_currentReply = nullptr;
+            return;
+        }
+
+        QJsonObject jsonObj = jsonDoc.object();
         FileUploadResponse response = FileUploadResponse::fromJson(jsonObj);
         m_lastErrorCode = response.code;
+
+        qDebug() << "Upload Response - Code:" << response.code
+                << "Success:" << response.success
+                << "Message:" << response.message;
 
         if (response.success && response.code == 200) {
             emit fileUploadSuccess(response);

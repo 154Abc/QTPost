@@ -29,11 +29,21 @@ public:
                                const QStringList &deviceCodes,
                                const QString &conditionType);
 
-    // File Upload API
+    // File Upload API - with file path
     void uploadTestResults(const QString &apiKey,
                           const QString &conditionType,
                           const QString &autoSysUnique,
-                          const QJsonObject &paramData);
+                          const QJsonArray &paramArray);
+
+    // File Upload API - with Base64 encoded files
+    void uploadTestResultsWithBase64(const QString &apiKey,
+                                    const QString &conditionType,
+                                    const QString &autoSysUnique,
+                                    const QStringList &filePaths,
+                                    const QStringList &keys);
+
+    // Utility: Encode file to Base64
+    static QString fileToBase64(const QString &filePath);
 
     // Getters
     QString getLastError() const { return m_lastError; }
